@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------- build outputs --
+# Compiled binaries are reproducible from source via build_customeventpack.sh,
+# patcher/ and ilfold/. The released .dll files live in the game's Managed/ folder
+# and in dist/, neither of which is tracked.
+bin/
+obj/
+out/
+*.dll
+*.exe
+*.pdb
+
+# ------------------------------------------------------------------ packaging --
+# Release archives are build products (CellToSingularityMod-win64.zip,
+# CellToSingularityEditor-win64.zip) and are rebuilt with the package_*.sh scripts.
+dist/
+*.zip
+
+# ------------------------------------------------------------ local-only bulk --
+# Machine-local artifacts that are large and/or not reproducible here:
+#   dll_backups/  snapshots of the game's assemblies (721 MB)
+#   devhome/, home/  throwaway HOME dirs used by the Proton test harness
+#   decomp/, decomp.log  full ilspycmd decompile of Assembly-CSharp (10 MB)
+dll_backups/
+devhome/
+home/
+decomp/
+decomp.log
+classes.txt
+
+# ------------------------------------------------------------------ scratch --
+*.log
+*.bak
+smoketest.png
+
+# ---------------------------------------------------------------------- OS --
+.DS_Store
+Thumbs.db

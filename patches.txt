@@ -1,0 +1,98 @@
+# Patch spec for Cell to Singularity - applied by _mod_tools/patcher to a PRISTINE
+# Assembly-CSharp.dll at every launch. Format: one directive per line, '#' comments.
+
+# mod 1 - tap rate limit 50/s -> 30/s
+const       Calculator AllowTapInput 50 30
+
+# mod 3 - unlock the framerate (whole body replaced by our hook)
+call        UIQualitySettings SetGraphicsQuality CustomEventPackPlugin CustomEventPack.PatchHooks UnlockFramerate
+
+# mod 4 - keep the time-capsule bonus across a simulation restart
+# REMOVED - deleting the CALL also skipped the private singInfo / bSingRunComplete
+# resets that ResetSimTimer performs, which hung the game on "reset main simulation".
+# Drop only the two time-capsule assignments instead.
+# removecall * * TimeManager ResetSimTimer
+dropinit    TimeManager ResetSimTimer totalTimeCurSim
+dropinit    TimeManager ResetSimTimer offlineTimeCurSim
+
+# The assignments above are NOT the ones that actually do the work: the caller zeroes both
+# fields BEFORE it ever calls ResetSimTimer, so removing them there changed nothing. DeleteSave.
+# OnPressedYesThirdTime is the "reset main simulation" confirmation handler and is static, which
+# is why storepop (replace the store with its pops) is used instead of dropinit.
+storepop    DeleteSave OnPressedYesThirdTime totalTimeCurSim
+storepop    DeleteSave OnPressedYesThirdTime offlineTimeCurSim
+
+# mod 5a - no nanobot cooldown after a boost ends
+# REMOVED - it broke the very feature it targeted. BoostTimerManager.Update uses
+# GetNanobotResetTimer_Seconds() BOTH as the cooldown length AND as the clamp for the
+# ACTIVE timer ("if (timer > reset) timer = reset"), so returning 0 made every nanobot
+# boost end the instant it started: the reported "nanobot working time is 0".
+# retconst    NanobotUpgradeStats GetNanobotResetTimer_Seconds 0
+
+# mod 5b - with a 0 cooldown the inline clamp in BoostTimerManager.Update would zero the
+# ACTIVE timer (the boost would end instantly); make that branch unconditional so it is skipped.
+# REMOVED: this matched the WRONG conditional branch (IL_00c2 instead of the clamp
+# at IL_0062 in BoostTimerManager.Update), leaving the stack unbalanced and making the
+# method throw InvalidProgramException ~130x/second. It was also redundant: the
+# 'retconst NanobotUpgradeStats GetNanobotResetTimer_Seconds 0' patch above already
+# makes the cooldown zero, which the clamp then pins to 0 anyway.
+# branchalways BoostTimerManager Update GetNanobotResetTimer_Seconds
+
+# mod 2 - every tap is worth 5
+# REMOVED - the callers discard the return value; the payout is applied by
+# CalTap*Value's own side effects on Calculator.bank / clickValuePerSec.
+# scaleret    GameController CalTapEvolutionValue 5
+# REMOVED - the callers discard the return value; the payout is applied by
+# CalTap*Value's own side effects on Calculator.bank / clickValuePerSec.
+# scaleret    GameController CalTapIdeaValue 5
+# REMOVED - the callers discard the return value; the payout is applied by
+# CalTap*Value's own side effects on Calculator.bank / clickValuePerSec.
+# scaleret    GameController CalTapDinoValue 5
+# REMOVED - the callers discard the return value; the payout is applied by
+# CalTap*Value's own side effects on Calculator.bank / clickValuePerSec.
+# scaleret    GameController CalTapSciValue 5
+
+# Retired: this hook existed to run the backdrop probe/repaint inside the game loop.
+# call        EventController Update CustomEventPackPlugin CustomEventPack.PatchHooks Tick
+
+# The event backdrop is drawn at the SAME sortingOrder (0) as the tree, and it only
+# stays out of the way because it is semi-transparent - so it can cover the connecting
+# lines. Push it far behind them, once, when the tree view is up.
+call        EventController Update CustomEventPackPlugin CustomEventPack.PatchHooks HideBackdrop
+
+# mod 2 (corrected) - every tap is worth 5.
+# CalTap*Value(sc) multiplies by its 'sc' argument; every tap site passes 10.0 and
+# DISCARDS the return value, so scaling the return (the old 'scaleret') did nothing.
+# Scale the argument instead.
+# Applied INSIDE CalTap*Value so EVERY tap path is covered: the manual tap passes the
+# TapEmptySpace.scale field (1.0) and the Assistant passes 10.0, so patching either call
+# site only ever fixed one of them.
+scalearg    GameController CalTapEvolutionValue 5
+scalearg    GameController CalTapIdeaValue 5
+scalearg    GameController CalTapDinoValue 5
+scalearg    GameController CalTapSciValue 5
+
+# mod 5 (corrected) - nanobot cooldown is 0.
+# Zero ONLY the assignment that sets the cooldown length when a boost ends. That value is
+# stored to the static 'timer' field, so the cooldown expires on the very next frame and
+# nanobots are immediately ready again. The OTHER call to the same method feeds the ACTIVE
+# timer's clamp ("if (timer > reset) timer = reset") and stores to a local, so it keeps its
+# real value - zeroing it there was what made every boost end the moment it started.
+callstoreconst BoostTimerManager * GetNanobotResetTimer_Seconds 0
+
+# mod: make the nanobots as fast as the game itself ever makes them.
+# Assistant..ctor initialises delaybuy = 0.15f (seconds between purchases) and baseSpeed = 10f
+# (units/second of travel). The game's own AI-mode branch uses delaybuy = 0.00833f (about 120
+# purchases per second) and baseSpeed = 400f, which is the fastest it ever configures. Apply
+# those to the initialisers so they hold whether or not AI mode is enabled.
+# REVERTED - the user asked for no value changes.
+# fieldinit   Assistant .ctor delaybuy 0.00833
+# REVERTED - the user asked for no value changes.
+# fieldinit   Assistant .ctor baseSpeed 400
+
+# Nanobot bonuses in a custom event.
+# UsesSharedBoostTimerForCurrentSimulation() only returns true for an event scene when
+# NanobotUpgradeStats.EventNanobotsUnlocked is set, and UpdateAll() derives that flag from
+# owning "a_nanobot_event" - an upgrade a custom event does not ship. Without it
+# GetNanobotTapPowerScale() short-circuits to 1f, so the nanobots receive no tap-power bonus.
+forcefield  NanobotUpgradeStats * EventNanobotsUnlocked 1

@@ -1427,7 +1427,7 @@ local function buildBgSteps(app)
   --- A generated, guaranteed-valid PNG (the bundled sample icons are not
   --- loadable images, so they cannot prove the copy path).
   local function testPng()
-    local path = "/tmp/c2s_smoke_background.png"
+    local path = Pack.tempPath("c2s_smoke_background.png")
     if app.smoke.testPngPath then return app.smoke.testPngPath end
     local w, h = 200, 140
     local id = love.image.newImageData(w, h)
@@ -1638,17 +1638,17 @@ local function buildDialogSteps(app)
   add({ setup = function()
         app.smoke.origDir = app.pack and app.pack.dir or nil
         app:openNewPackDialog()
-        app.newPack.parent = "/tmp/c2s_editor_newpack"
+        app.newPack.parent = Pack.tempPath("c2s_editor_newpack")
         app.newPack.id = "smoke_new"
         app.newPack.title = "冒烟新建"
       end })
   add({ click = "np.id" })
   add({ key = "return" })
   add({ check = function() return np() == nil end, name = "new-pack dialog: Enter confirms" })
-  add({ check = function() return Pack.exists("/tmp/c2s_editor_newpack/smoke_new/tree.json") end,
+  add({ check = function() return Pack.exists(Pack.tempPath("c2s_editor_newpack/smoke_new/tree.json")) end,
       name = "new-pack dialog: Enter actually created the pack" })
   add({ setup = function()
-        Pack.removeTree("/tmp/c2s_editor_newpack")
+        Pack.removeTree(Pack.tempPath("c2s_editor_newpack"))
         if app.smoke.origDir then app:openPack(app.smoke.origDir) end
         ui.focus = nil
       end })
@@ -1922,7 +1922,7 @@ function App:smokeStep()
     self:smokeShot("smoketest.png", false)
   elseif s.frames == 64 then
     -- full "new pack" GUI flow, written to a scratch folder outside the repo
-    s.tmpParent = "/tmp/c2s_editor_smoke"
+    s.tmpParent = Pack.tempPath("c2s_editor_smoke")
     Pack.removeTree(s.tmpParent)
     local created = self:createPack(s.tmpParent, "SmokePack", "冒烟测试包")
     smokeCheck("new pack created through the GUI", created == true and self.pack ~= nil)
@@ -1985,7 +1985,7 @@ function App:smokeStep()
     self.dirty = false
     self:smokeShot("smoketest_dropdown.png", false)
   elseif s.frames == 80 then
-    s.bigDir = writeBigPack("/tmp/c2s_editor_smoke_big")
+    s.bigDir = writeBigPack(Pack.tempPath("c2s_editor_smoke_big"))
     local ok = self:openPack(s.bigDir)
     smokeCheck("8 ranks x 4 missions pack opens", ok == true and self.pack ~= nil)
     smokeCheck("pack really has 9 ranks of 4 missions",
@@ -2453,7 +2453,7 @@ function App:smokeStep()
   -- must be the first rank's card count.
   -- ---------------------------------------------------------------------
   elseif s.frames == 154 then
-    s.progDir = writeProgressionPack("/tmp/c2s_editor_smoke_prog")
+    s.progDir = writeProgressionPack(Pack.tempPath("c2s_editor_smoke_prog"))
     self:openPack(s.progDir)
     self.view = "settings"
     self:validate(true)
@@ -2590,7 +2590,7 @@ function App:smokeStep()
     local targets = s.targets
     targets[3] = { item = "deepsea_vent", amount = 5 }
     Pack.setMissionTargets(m1, targets)
-    local tmp = "/tmp/c2s_editor_targets.json"
+    local tmp = Pack.tempPath("c2s_editor_targets.json")
     json.writeFile(tmp, json.encode(self.pack.meta, { indent = 2, keyOrder = Pack.PACK_KEY_ORDER }))
     local back = json.decodeFile(tmp)
     local b1 = back.missions[1].missions[1]

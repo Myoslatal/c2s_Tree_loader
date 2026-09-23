@@ -620,7 +620,7 @@ local function testConfig()
   local parsed = Config.parse("# comment" .. json.NL .. "ui_scale=1.25" .. json.NL ..
     "sidebar=false" .. json.NL .. "view=settings" .. json.NL .. "last_pack=/tmp/x" .. json.NL .. "broken line")
   check("config: parses key=value lines", parsed.ui_scale == 1.25 and parsed.sidebar == false
-    and parsed.view == "settings" and parsed.last_pack == "/tmp/x",
+    and parsed.view == "settings" and parsed.last_pack == Pack.tempPath("x"),
     json.encode(parsed, { indent = 0 }))
   check("config: ignores comments and junk", parsed["# comment"] == nil)
 

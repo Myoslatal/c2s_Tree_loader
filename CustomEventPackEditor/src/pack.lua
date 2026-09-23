@@ -89,16 +89,175 @@ end
 local IS_WINDOWS = package.config:sub(1, 1) == "\\"
 Pack.isWindows = IS_WINDOWS
 
+--- Resolve a path to "dir"/"file"/nil through the Win32 API. This exists because
+--- love.filesystem.getInfo cannot see user pack folders at all (probed, see above), so
+--- on Windows the ONLY reliable, shell-free way to ask "is this a directory?" is the
+--- kernel. Cached FFI handle plus a hand-rolled UTF-8 -> UTF-16 conversion (LuaJIT has
+--- no iconv), so non-ASCII paths work. Returns nil when the path is absent or when FFI
+--- is unavailable, letting callers fall back.
+local _win32 = nil
+
+--- UTF-8 -> a NUL-terminated uint16_t buffer (UTF-16LE). LuaJIT has no iconv.
+local function toWide(ffiLib, path)
+  local units = {}
+  local i, n = 1, #path
+  while i <= n do
+    local c = path:byte(i)
+    local cp, size
+    if c < 0x80 then cp, size = c, 1
+    elseif c < 0xE0 then cp, size = c % 0x20, 2
+    elseif c < 0xF0 then cp, size = c % 0x10, 3
+    else cp, size = c % 0x08, 4 end
+    for k = 1, size - 1 do
+      local b = path:byte(i + k)
+      if not b then return nil end
+      cp = cp * 64 + (b % 0x40)
+    end
+    i = i + size
+    if cp > 0xFFFF then
+      cp = cp - 0x10000
+      units[#units + 1] = 0xD800 + math.floor(cp / 0x400)
+      units[#units + 1] = 0xDC00 + (cp % 0x400)
+    else
+      units[#units + 1] = cp
+    end
+  end
+  units[#units + 1] = 0
+  local buf = ffiLib.new("uint16_t[?]", #units)
+  for k = 1, #units do buf[k - 1] = units[k] end
+  return buf
+end
+
+--- UTF-16LE code units -> a Lua string (decodes the surrogate pairs toWide produces).
+local function fromWide(ffiLib, buf)
+  local out, i = {}, 0
+  while true do
+    local u = tonumber(buf[i]) or 0
+    if u == 0 then break end
+    i = i + 1
+    local cp = u
+    if u >= 0xD800 and u <= 0xDBFF then
+      local u2 = tonumber(buf[i]) or 0
+      if u2 >= 0xDC00 and u2 <= 0xDFFF then
+        i = i + 1
+        cp = 0x10000 + (u - 0xD800) * 0x400 + (u2 - 0xDC00)
+      end
+    end
+    if cp < 0x80 then out[#out + 1] = string.char(cp)
+    elseif cp < 0x800 then out[#out + 1] = string.char(0xC0 + math.floor(cp / 64), 0x80 + cp % 64)
+    elseif cp < 0x10000 then
+      out[#out + 1] = string.char(0xE0 + math.floor(cp / 4096), 0x80 + math.floor(cp / 64) % 64, 0x80 + cp % 64)
+    else
+      out[#out + 1] = string.char(0xF0 + math.floor(cp / 262144), 0x80 + math.floor(cp / 4096) % 64,
+        0x80 + math.floor(cp / 64) % 64, 0x80 + cp % 64)
+    end
+  end
+  return table.concat(out)
+end
+
+--- Win32 declarations + kernel32 handle, resolved once. Everything here is a plain API
+--- call: no console window is created, which is the whole reason this layer exists.
+local function win32Init()
+  if _win32 ~= nil then return _win32 end
+  local ok, ffiLib = pcall(require, "ffi")
+  if not ok or not ffiLib then _win32 = false return _win32 end
+  local decl = [[
+    typedef struct _W32FD {
+      unsigned int  dwFileAttributes;
+      unsigned int  ftCreationTimeLo,  ftCreationTimeHi;
+      unsigned int  ftLastAccessTimeLo, ftLastAccessTimeHi;
+      unsigned int  ftLastWriteTimeLo, ftLastWriteTimeHi;
+      unsigned int  nFileSizeHigh, nFileSizeLow;
+      unsigned int  dwReserved0, dwReserved1;
+      unsigned short cFileName[260];
+      unsigned short cAlternateFileName[14];
+    } W32FD;
+    int  GetFileAttributesW(const unsigned short *p);
+    void *FindFirstFileW(const unsigned short *p, W32FD *out);
+    int  FindNextFileW(void *h, W32FD *out);
+    int  FindClose(void *h);
+    int  CreateDirectoryW(const unsigned short *p, void *sec);
+    int  RemoveDirectoryW(const unsigned short *p);
+    int  DeleteFileW(const unsigned short *p);
+  ]]
+  local okDef = pcall(ffiLib.cdef, decl)
+  local okLib, kernel32 = pcall(ffiLib.load, "kernel32")
+  _win32 = (okDef and okLib) and { ffi = ffiLib, api = kernel32 } or false
+  return _win32
+end
+
+local function win32PathKind(path)
+  local w = win32Init()
+  if w == false then return nil end
+  local buf = toWide(w.ffi, path)
+  if not buf then return nil end
+  local attr = w.api.GetFileAttributesW(buf)
+  if attr == -1 then return nil end
+  if math.floor(attr / 16) % 2 == 1 then return "dir" end   -- FILE_ATTRIBUTE_DIRECTORY
+  return "file"
+end
+
+--- List a real directory through FindFirstFileW. love.filesystem.getDirectoryItems has
+--- the same blind spot as getInfo (see above), so without this the browser showed an
+--- empty folder for every user pack on Windows. Returns array of { name, isDir }.
+local function win32ListDir(path)
+  if win32PathKind(path) ~= "dir" then return {} end
+  local ffiLib, api = _win32.ffi, _win32.api
+  if not ffiLib or not api or not api.FindFirstFileW then return {} end
+  local pat = toWide(ffiLib, (path:gsub("[\\/]+$", "")) .. "\\*")
+  if not pat then return {} end
+  local data = ffiLib.new("W32FD[1]")
+  local h = api.FindFirstFileW(pat, data)
+  if h == ffiLib.cast("void *", -1) then return {} end
+  local out = {}
+  repeat
+    local name = fromWide(ffiLib, data[0].cFileName)
+    if name and name ~= "." and name ~= ".." then
+      local attr = tonumber(data[0].dwFileAttributes) or 0
+      out[#out + 1] = { name = name, isDir = math.floor(attr / 16) % 2 == 1 }
+    end
+  until api.FindNextFileW(h, data) == 0
+  api.FindClose(h)
+  return out
+end
+
+--- Create a directory and every missing parent through CreateDirectoryW.
+local function win32Mkdirp(path)
+  if win32PathKind(path) == "dir" then return true end
+  local ffiLib, api = _win32.ffi, _win32.api
+  if not ffiLib or not api or not api.CreateDirectoryW then return false end
+  local parent = path:match("^(.*)[/\\][^/\\]+$")
+  if parent and parent ~= "" and win32PathKind(parent) ~= "dir" then win32Mkdirp(parent) end
+  local w = toWide(ffiLib, path)
+  if not w then return false end
+  api.CreateDirectoryW(w, nil)
+  return win32PathKind(path) == "dir"
+end
+
+--- Delete one file or empty directory through the Win32 API.
+local function win32Remove(path)
+  local ffiLib, api = _win32.ffi, _win32.api
+  if not ffiLib or not api then return false end
+  local w = toWide(ffiLib, path)
+  if not w then return false end
+  if win32PathKind(path) == "dir" then
+    return api.RemoveDirectoryW(w) ~= 0
+  end
+  return api.DeleteFileW(w) ~= 0
+end
+
 --- "dir", "file" or nil, without ever spawning a process on Windows.
 function Pack.stat(path)
   if not path or path == "" then return nil end
   if IS_WINDOWS then
-    local info = love.filesystem.getInfo(path)
-    if info then return info.type == "directory" and "dir" or "file" end
-    local ok, items = pcall(love.filesystem.getDirectoryItems, path)
-    if ok and type(items) == "table" and #items >= 0 and love.filesystem.getInfo(path) then
-      return "dir"
-    end
+    -- love.filesystem.getInfo only resolves the LOVE source and save directories (see
+    -- the note above Pack.imageCache), so every pack folder OUTSIDE those - the normal
+    -- case - reported nil here and the editor concluded "the directory does not exist".
+    -- The old workaround then re-checked getInfo and could never return "dir" at all.
+    -- Ask the OS directly instead: GetFileAttributesW works on any path and, unlike
+    -- io.popen, spawns no console window.
+    local kind = win32PathKind(path)
+    if kind then return kind end
     local f = io.open(path, "rb")
     if f then f:close() return "file" end
     return nil
@@ -153,8 +312,7 @@ end
 function Pack.mkdirp(path)
   if Pack.stat(path) == "dir" then return true end
   if IS_WINDOWS then
-    love.filesystem.createDirectory(path)   -- creates every missing parent level itself
-    return Pack.stat(path) == "dir"
+    return win32Mkdirp(path)   -- creates every missing parent level itself
   end
   os.execute("mkdir -p " .. shellQuote(path))
   return Pack.stat(path) == "dir"
@@ -168,19 +326,14 @@ function Pack.removeTree(path)
     os.execute("rm -rf " .. shellQuote(path))
     return Pack.stat(path) == nil
   end
-  local info = love.filesystem.getInfo(path)
-  if not info then
-    if io.open(path, "rb") then return os.remove(path) ~= nil end
-    return true
-  end
-  if info.type == "directory" then
-    local ok, items = pcall(love.filesystem.getDirectoryItems, path)
-    if ok and type(items) == "table" then
-      for _, name in ipairs(items) do Pack.removeTree(Pack.join(path, name)) end
+  local kind = Pack.stat(path)
+  if not kind then return true end
+  if kind == "dir" then
+    for _, item in ipairs(win32ListDir(path)) do
+      Pack.removeTree(Pack.join(path, item.name))
     end
-    return love.filesystem.remove(path) and true or false
   end
-  return love.filesystem.remove(path) and true or false
+  return win32Remove(path) or Pack.stat(path) == nil
 end
 
 --- List a directory: array of { name = <basename>, path = <full>, dir = <bool> }.
@@ -188,11 +341,9 @@ function Pack.listDir(path)
   local out = {}
   if not path or path == "" then return out end
   if IS_WINDOWS then
-    local ok, items = pcall(love.filesystem.getDirectoryItems, path)
-    if not ok or type(items) ~= "table" then return out end
-    for _, name in ipairs(items) do
-      local full = Pack.join(path, name)
-      out[#out + 1] = { name = name, path = full, dir = Pack.stat(full) == "dir" }
+    for _, item in ipairs(win32ListDir(path)) do
+      local full = Pack.join(path, item.name)
+      out[#out + 1] = { name = item.name, path = full, dir = item.isDir }
     end
   else
     local p = io.popen("ls -1ap " .. shellQuote(path) .. " 2>/dev/null")
@@ -290,6 +441,163 @@ function Pack.copyFile(src, dst)
   return true
 end
 
+--------------------------------------------------------------------------------
+-- Pure-Lua ZIP writer (Windows path)
+--
+-- On Windows this MUST NOT shell out: every io.popen/os.execute flashes a cmd.exe
+-- console window (that is why the whole filesystem layer above was rewritten to use
+-- the LOVE API). `zip` does not exist on Windows either. So the archive is written
+-- here, byte by byte, and DEFLATE comes from love.math.compress - a LOVE API, no
+-- process involved.
+--
+-- Container layout written (APPNOTE 4.3.7 / 4.3.8 / 4.3.16):
+--   [local file header + name + data] ... [central directory header ...] [EOCD]
+--------------------------------------------------------------------------------
+
+local function u16(n)
+  n = n % 65536
+  return string.char(n % 256, math.floor(n / 256) % 256)
+end
+
+local function u32(n)
+  n = n % 4294967296
+  return string.char(n % 256, math.floor(n / 256) % 256,
+    math.floor(n / 65536) % 256, math.floor(n / 16777216) % 256)
+end
+
+local bxor = (function()
+  local ok, b = pcall(require, "bit")
+  if ok and b and b.bxor then
+    return function(a, c) return b.bxor(a, c) end
+  end
+  -- arithmetic fallback so the writer is testable outside LuaJIT too
+  local function ax(a, c)
+    local r, p = 0, 1
+    for _ = 1, 32 do
+      local x, y = a % 2, c % 2
+      if x ~= y then r = r + p end
+      a, c, p = (a - x) / 2, (c - y) / 2, p * 2
+    end
+    return r
+  end
+  return ax
+end)()
+
+local crcTable = nil
+local function crc32(s)
+  if not crcTable then
+    crcTable = {}
+    for i = 0, 255 do
+      local c = i
+      for _ = 1, 8 do
+        if c % 2 == 1 then c = bxor(0xEDB88320, math.floor(c / 2))
+        else c = math.floor(c / 2) end
+      end
+      crcTable[i] = c
+    end
+  end
+  local crc = 0xFFFFFFFF
+  for i = 1, #s do
+    crc = bxor(crcTable[bxor(crc % 256, s:byte(i))], math.floor(crc / 256))
+  end
+  return bxor(crc, 0xFFFFFFFF)
+end
+Pack.crc32 = crc32
+
+--- Raw DEFLATE bytes for a string. Uses love.math.compress (a LOVE API - no shell).
+--- Pack._deflateOverride lets a headless test inject another deflater so the zip
+--- container logic can be verified with `unzip -t` outside LOVE.
+Pack._deflateOverride = nil
+local function deflate(data, level)
+  if Pack._deflateOverride then return Pack._deflateOverride(data, level), true end
+  local cd = love.math.compress(data, "deflate", level or 9)
+  return cd:getString(), true
+end
+
+local function dosDateTime(t)
+  t = t or os.date("*t")
+  local year = math.max(1980, t.year)
+  local time = (t.hour % 24) * 2048 + (t.min % 60) * 32 + math.floor((t.sec or 0) / 2)
+  local date = (year - 1980) * 512 + (t.month % 12 + 1) * 32 + (t.day % 32)
+  return time, date
+end
+
+--- Collect every entry under srcDir as { name, path, isDir }, names relative to
+--- srcDir and using forward slashes (the only separator a zip may contain).
+local function collectEntries(srcDir)
+  local out = {}
+  local function walk(rel)
+    local abs = rel == "" and srcDir or Pack.join(srcDir, rel)
+    for _, item in ipairs(Pack.listDir(abs)) do
+      local r = rel == "" and item.name or (rel .. "/" .. item.name)
+      if item.dir then
+        out[#out + 1] = { name = r .. "/", isDir = true }
+        walk(r)
+      else
+        out[#out + 1] = { name = r, path = item.path, isDir = false }
+      end
+    end
+  end
+  walk("")
+  table.sort(out, function(a, b) return a.name < b.name end)
+  return out
+end
+
+--- Write a zip from scratch with no shell involvement. Returns (zipPath) or
+--- (nil, message). Mirrors Pack.exportZip's contract exactly.
+function Pack.exportZipNative(srcDir, zipPath)
+  if Pack.stat(srcDir) ~= "dir" then return nil, "不是目录: " .. tostring(srcDir) end
+  local outDir = Pack.dirname(zipPath)
+  if outDir and outDir ~= "" then pcall(Pack.mkdirp, outDir) end
+
+  local folder = Pack.basename((srcDir:gsub("/$", "")))
+  local entries = collectEntries(srcDir)
+  local chunks, central = {}, {}
+  local offset = 0
+  local time, date = dosDateTime()
+
+  -- A top-level directory entry, so an empty pack still extracts to <PackName>/.
+  -- NOTE the name is RELATIVE (like every other entry) and is prefixed with the
+  -- folder name once, below - putting folder here produced a spurious <PackName>/<PackName>/.
+  local top = { name = "", isDir = true }
+  table.insert(entries, 1, top)
+
+  for _, ent in ipairs(entries) do
+    local name = folder .. "/" .. ent.name
+    local body, method, crc, usize = "", 0, 0, 0
+    if not ent.isDir then
+      local f = io.open(ent.path, "rb")
+      if not f then return nil, "无法读取 " .. tostring(ent.path) end
+      body = f:read("*a") or ""
+      f:close()
+      crc, usize = crc32(body), #body
+      local comp, ok = deflate(body, 9)
+      if ok and comp and #comp < usize then body, method = comp, 8 else method = 0 end
+    end
+
+    local header = u32(0x04034b50) .. u16(20) .. u16(0) .. u16(method)
+      .. u16(time) .. u16(date) .. u32(crc) .. u32(#body) .. u32(usize)
+      .. u16(#name) .. u16(0) .. name
+    chunks[#chunks + 1] = header .. body
+
+    central[#central + 1] = u32(0x02014b50) .. u16(20) .. u16(20) .. u16(0) .. u16(method)
+      .. u16(time) .. u16(date) .. u32(crc) .. u32(#body) .. u32(usize)
+      .. u16(#name) .. u16(0) .. u16(0) .. u16(0) .. u16(0)
+      .. u32(ent.isDir and 0x10 or 0) .. u32(offset) .. name
+    offset = offset + #header + #body
+  end
+
+  local cdBlob = table.concat(central)
+  local eocd = u32(0x06054b50) .. u16(0) .. u16(0) .. u16(#entries) .. u16(#entries)
+    .. u32(#cdBlob) .. u32(offset) .. u16(0)
+
+  local f, werr = io.open(zipPath, "wb")
+  if not f then return nil, werr or ("无法写入 " .. tostring(zipPath)) end
+  f:write(table.concat(chunks), cdBlob, eocd)
+  f:close()
+  return zipPath, nil
+end
+
 --- Publish a pack directory as a .zip. Linux first ("先适配linux"), Windows later.
 ---
 --- The archive must extract to a single <PackName>/ folder holding pack.json +
@@ -303,6 +611,9 @@ end
 --- on success, (nil, message) on failure.
 function Pack.exportZip(srcDir, zipPath)
   if not srcDir or srcDir == "" then return nil, "未指定活动包目录" end
+  -- Windows: no `zip` binary, and shelling out flashes a console window every call.
+  -- The pure-Lua writer uses only LOVE APIs and io.
+  if IS_WINDOWS then return Pack.exportZipNative(srcDir, zipPath) end
   if not zipPath or zipPath == "" then return nil, "未指定输出路径" end
   if Pack.stat(srcDir) ~= "dir" then return nil, "不是目录: " .. tostring(srcDir) end
 
@@ -344,6 +655,25 @@ function Pack.fileSize(path)
   local n = f:seek("end")
   f:close()
   return n
+end
+
+--- Portable scratch directory. /tmp is POSIX-only and does not exist on Windows, where
+--- every hardcoded "/tmp/..." path silently failed (the smoke test could not write its
+--- scratch packs or screenshots). Honour the standard temp env vars first, then LOVE's
+--- save directory, and only then fall back to a conventional location.
+function Pack.tempDir()
+  local t = os.getenv("TMPDIR") or os.getenv("TEMP") or os.getenv("TMP")
+  if type(t) == "string" and t ~= "" then return (t:gsub("[\\/]+$", "")) end
+  if type(love) == "table" and love.filesystem and love.filesystem.getSaveDirectory then
+    local ok, d = pcall(love.filesystem.getSaveDirectory)
+    if ok and type(d) == "string" and d ~= "" then return (d:gsub("[\\/]+$", "")) end
+  end
+  return IS_WINDOWS and "C:/Windows/Temp" or "/tmp"
+end
+
+--- A scratch file/directory path under Pack.tempDir().
+function Pack.tempPath(name)
+  return Pack.join(Pack.tempDir(), name)
 end
 
 --- Standard roots scanned for packs. The workspace CustomEvents folder comes first.

@@ -32,6 +32,12 @@ classes.txt
 *.bak
 smoketest.png
 
+# -------------------------------------------------------------------- fonts --
+# The CJK font FontReplacerPlugin loads (11 MB). A copy lands under dist/ while
+# packaging and must never be committed: third-party binary, large, and the release
+# takes it from wherever --font points. Ignored, never deleted.
+zh-cn.ttf
+
 # ---------------------------------------------------------------------- OS --
 .DS_Store
 Thumbs.db

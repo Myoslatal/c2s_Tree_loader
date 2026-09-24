@@ -24,9 +24,28 @@ internal static class Dump
             foreach (var f in t.Fields)
                 Console.WriteLine("  FIELD   : " + f.FieldType.FullName + " " + f.Name);
             foreach (var m in t.Methods)
+            {
                 Console.WriteLine("  METHOD  : " + m.ReturnType.FullName + " " + m.Name +
                     "(" + string.Join(",", m.Parameters.Select(p => p.ParameterType.FullName)) + ")" +
                     " attrs=" + m.Attributes + " impl=" + m.ImplAttributes);
+
+                // 3rd argument: dump this method's IL body. Used to check WHERE an injected
+                // call actually landed and how many rets the method has - an appendcall that
+                // targets the last ret is useless if that ret sits on a cold branch.
+                if (args.Length < 3 || args[2] != m.Name || !m.HasBody) continue;
+                Console.WriteLine("    IL    : maxStack=" + m.Body.MaxStackSize +
+                    " locals=" + m.Body.Variables.Count + " instrs=" + m.Body.Instructions.Count);
+                foreach (var ins in m.Body.Instructions)
+                {
+                    string mark = (ins.OpCode.Name == "ret") ? "   <== RET" :
+                        (ins.OpCode.Name == "call" || ins.OpCode.Name == "callvirt") ? "   <== CALL" : "";
+                    Console.WriteLine("      " + ins.Offset.ToString("X4") + ": " +
+                        ins.OpCode.Name.PadRight(10) + " " +
+                        (ins.Operand == null ? "" : ins.Operand.ToString()) + mark);
+                }
+                int rets = m.Body.Instructions.Count(i => i.OpCode.Name == "ret");
+                Console.WriteLine("    RET COUNT = " + rets);
+            }
         }
         return 0;
     }

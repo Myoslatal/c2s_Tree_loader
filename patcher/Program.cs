@@ -86,6 +86,57 @@ foreach (var line in lines)
                 applied += n;
                 break;
             }
+
+
+            case "appendcall":
+            {
+                // Insert `call <hook>` immediately BEFORE the last ret, so the hook runs
+                // AFTER the original body has done its work. `call` (prefix injection) is
+                // useless when the point of the hook is to revise something the original
+                // body just assigned - the original would simply overwrite it again.
+                var t = FindType(asm, a[1]); var m = FindMethod(t, a[2]);
+                var callRef = ResolveCall(asm, resolver, a[3], a[4], a[5]);
+                var il = m.Body.GetILProcessor();
+                var ret = m.Body.Instructions.LastOrDefault(x => x.OpCode == OpCodes.Ret);
+                if (ret == null)
+                {
+                    Console.WriteLine($"  appendcall {a[1]}.{a[2]} FAILED (no ret)"); failed++;
+                }
+                else
+                {
+                    // Insert the call, then RETARGET every branch that jumps to the ret so it
+                    // jumps to the call instead. Without this the call is only reachable by
+                    // FALLING THROUGH from the instruction above it - which lands it inside
+                    // whatever if-block happens to end the method.
+                    //
+                    // Real case that broke the first version: SegLeaderboardDisplay.Start()
+                    // ends with
+                    //     if (eventIsDone) { Destroy(addFriendButtonHolder); }
+                    //     ret
+                    // so "insert before the last ret" put the hook INSIDE the if-body, and the
+                    // brfalse that skips the if-body jumped straight over the hook. The hook
+                    // then never ran during an active event (eventIsDone == false).
+                    var callIns = il.Create(OpCodes.Call, callRef);
+                    il.InsertBefore(ret, callIns);
+                    int redirected = 0;
+                    foreach (var ins in m.Body.Instructions)
+                    {
+                        if (ins.Operand is Instruction tgt && tgt == ret && ins != callIns)
+                        {
+                            ins.Operand = callIns;
+                            redirected++;
+                        }
+                    }
+                    foreach (var eh in m.Body.ExceptionHandlers)
+                    {
+                        if (eh.TryEnd == ret) { eh.TryEnd = callIns; redirected++; }
+                        if (eh.HandlerStart == ret) { eh.HandlerStart = callIns; redirected++; }
+                        if (eh.HandlerEnd == ret) { eh.HandlerEnd = callIns; redirected++; }
+                    }
+                    Console.WriteLine($"  appendcall {a[1]}.{a[2]} <- {a[4]}.{a[5]}  ({redirected} branch(es) retargeted)"); applied++;
+                }
+                break;
+            }
             case "replacebody":
             {
                 // void method: body becomes  call <ourMethod>; ret

@@ -4419,6 +4419,8 @@ public static class PatchHooks
 {
 	private static int _ticks;
 
+	private static int _hintLogged;
+
 	private static int _repaints;
 
 	private static Texture2D _bgTex;
@@ -4467,6 +4469,93 @@ public static class PatchHooks
 				+ " nanoStatePref=" + PlayerPrefs.GetInt("nano_state"));
 		}
 		catch (Exception e) { Log.Error("NanoProbe", e); }
+	}
+
+	/// <summary>
+	/// Rewrite the event-leaderboard "next rank" hint.
+	///
+	/// Vanilla (SegLeaderboardDisplay.Start()) writes
+	///     seg_increase_score / seg_score_away  =  "收集 {0} 即可达到 {1}"
+	/// where {0} is the score gap to the LAST seat of the next segment up and {1} is
+	/// that segment's localised name. The mod replaces it with the two-gap format
+	///     距离前<N>名 {gap}，距离上一名 {gapAbove}
+	///
+	/// Both gaps are recomputed here from the same cohort list vanilla reads:
+	///   gap     = cohort[rankGroups[i-1].breakPoint - 1].score - myInfo.score
+	///           = what is still missing to take the last seat of the segment above.
+	///   gapAbove= cohort[myInfo.sorted_rank - 2].score - myInfo.score
+	///           = what is still missing to overtake the single player above me.
+	///
+	/// Injected at the END of Start() (appendcall) rather than its head (call): Start()
+	/// ASSIGNS the text, so a head injection would simply be overwritten again.
+	/// Vanilla also Destroy()s nextRankObject whenever it has nothing to say (top
+	/// segment, unknown own rank, already ahead). Those rows keep an empty text, and an
+	/// empty text is the signal here to leave the hint alone.
+	/// </summary>
+	public static void RewriteNextRankHint()
+	{
+		try
+		{
+			// One-shot diagnostics. The first version of this hook logged ONLY on exception,
+			// which made a silent early-return indistinguishable from the hook never running
+			// at all. Every early return now reports why it gave up.
+			bool loud = System.Threading.Interlocked.Increment(ref _hintLogged) <= 4;
+			SegLeaderboardDisplay d = UnityEngine.Object.FindObjectOfType<SegLeaderboardDisplay>();
+			if (loud) Log.Info("HINT display=" + (d != null)
+				+ " nextRankText=" + (d != null && d.nextRankText != null)
+				+ " text=[" + ((d != null && d.nextRankText != null) ? d.nextRankText.text : "<n/a>") + "]");
+			if (d == null || d.nextRankText == null) return;
+
+			SegmentedLeaderboardManager slm0 = SegmentedLeaderboardManager.instance;
+			if (loud) Log.Info("HINT slm=" + (slm0 != null)
+				+ " myInfo=" + (slm0 != null && slm0.myInfo != null)
+				+ " cohort=" + ((slm0 != null && slm0.cohort != null) ? slm0.cohort.Count.ToString() : "<null>")
+				+ " groups=" + ((slm0 != null && slm0.rankGroups != null) ? slm0.rankGroups.Length.ToString() : "<null>"));
+
+			if (string.IsNullOrEmpty(d.nextRankText.text))
+			{
+				if (loud) Log.Info("HINT vanilla left the text empty -> skipped (row was Destroy()ed)");
+				return;
+			}
+			if (loud) Log.Info("HINT vanilla text=[" + d.nextRankText.text + "] -> rewriting");
+
+			SegmentedLeaderboardManager slm = SegmentedLeaderboardManager.instance;
+			if (slm == null || slm.myInfo == null || slm.cohort == null || slm.rankGroups == null) return;
+
+			// Locate my segment: the hint is only meaningful when there is one above it.
+			int i = -1;
+			for (int k = 0; k < slm.rankGroups.Length; k++)
+				if (slm.rankGroups[k] == slm.myRankGroup) { i = k; break; }
+			if (i <= 0) return;
+
+			SegLeaderboardRankGroup above = slm.rankGroups[i - 1];
+			string icon = "<voffset=-0.3em><size=22>" + Calculator.eventCurrencyText + "</size></voffset>";
+			string s = "";
+
+			// 距离前<N>名 ---- the last seat of the segment above, i.e. rank == breakPoint.
+			int seat = above.breakPoint - 1;                       // cohort index of that seat
+			if (seat >= 0 && seat < slm.cohort.Count)
+			{
+				int gap = slm.cohort[seat].score - slm.myInfo.score;
+				if (gap > 0) s = "距离前" + above.breakPoint + "名" + icon + gap;
+			}
+
+			// 距离上一名 ---- cohort is sorted by score descending, so my own row is at
+			// index sorted_rank-1 and the player above me at sorted_rank-2.
+			int aboveIdx = slm.myInfo.sorted_rank - 2;
+			if (aboveIdx >= 0 && aboveIdx < slm.cohort.Count)
+			{
+				int gap = slm.cohort[aboveIdx].score - slm.myInfo.score;
+				if (gap > 0)
+				{
+					if (s != "") s += "，";
+					s += "距离上一名" + icon + gap;
+				}
+			}
+
+			if (s != "") d.nextRankText.text = s;
+		}
+		catch (Exception e) { Log.Error("RewriteNextRankHint", e); }
 	}
 
 	public static void HideBackdrop()

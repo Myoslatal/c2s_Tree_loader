@@ -12,7 +12,10 @@ internal static class Program
     private static int Main(string[] args)
     {
         // "ildump" reuses this binary to inspect a single type
-        if (args.Length >= 2 && args[0] == "--dump") return Dump.Run(new[] { args[1], args[2] });
+        // Forward EVERY remaining argument: the method name is optional arg 3 and Dump uses it
+        // to decide which method body to print. The old "new[] { args[1], args[2] }" silently
+        // dropped it, so the IL body never printed at all.
+        if (args.Length >= 2 && args[0] == "--dump") return Dump.Run(args.Skip(1).ToArray());
 
         var asm = AssemblyDefinition.ReadAssembly(args[0], new ReaderParameters
         {

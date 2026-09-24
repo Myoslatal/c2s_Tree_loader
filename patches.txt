@@ -96,3 +96,15 @@ callstoreconst BoostTimerManager * GetNanobotResetTimer_Seconds 0
 # owning "a_nanobot_event" - an upgrade a custom event does not ship. Without it
 # GetNanobotTapPowerScale() short-circuits to 1f, so the nanobots receive no tap-power bonus.
 forcefield  NanobotUpgradeStats * EventNanobotsUnlocked 1
+
+# Event leaderboard "next rank" hint.
+# Vanilla writes "收集 <gap> 即可达到 <segmentName>" (seg_increase_score / seg_score_away)
+# in SegLeaderboardDisplay.Start(). The mod replaces that with the two-gap format
+#   距离前<N>名 <gap>，距离上一名 <gapAbove>
+# The hook is injected at the END of Start() (appendcall), not at its head (call),
+# precisely because it has to revise the text Start() has just assigned.
+appendcall  SegLeaderboardDisplay Start CustomEventPackPlugin CustomEventPack.PatchHooks RewriteNextRankHint
+
+
+
+

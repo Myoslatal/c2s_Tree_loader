@@ -295,6 +295,40 @@ foreach (var line in lines)
                 applied += n;
                 break;
             }
+            case "scaleargcall":
+            {
+                // Same as scalearg, but the factor comes from a runtime hook instead of a
+                // literal baked into the IL:
+                //     ldarg p0
+                //     call  <hook>        <- returns the current multiplier
+                //     mul
+                //     starg p0
+                // so changing the config file changes the multiplier without re-patching or
+                // re-folding the assembly. A baked constant would need a rebuild every tweak.
+                var t3c = FindType(asm, a[1]);
+                var callRef3 = ResolveCall(asm, resolver, a[3], a[4], a[5]);
+                int n3 = 0;
+                foreach (var m in t3c.Methods.Where(x => x.Name == a[2] && x.HasBody && x.Parameters.Count > 0))
+                {
+                    var p0 = m.Parameters[0].ParameterType;
+                    if (p0.MetadataType != MetadataType.Double && p0.MetadataType != MetadataType.Single)
+                        continue;
+                    var il = m.Body.GetILProcessor();
+                    var first = m.Body.Instructions[0];
+                    il.InsertBefore(first, il.Create(OpCodes.Ldarg, m.Parameters[0]));
+                    il.InsertBefore(first, il.Create(OpCodes.Call, callRef3));
+                    // the hook returns double; narrow it when the parameter is a float
+                    if (p0.MetadataType == MetadataType.Single)
+                        il.InsertBefore(first, il.Create(OpCodes.Conv_R4));
+                    il.InsertBefore(first, il.Create(OpCodes.Mul));
+                    il.InsertBefore(first, il.Create(OpCodes.Starg, m.Parameters[0]));
+                    n3++;
+                }
+                Console.WriteLine($"  scaleargcall {a[1]}.{a[2]} arg0 x {a[4]}.{a[5]}  ({n3} overload(s))");
+                if (n3 == 0) failed++;
+                applied += n3;
+                break;
+            }
             case "dropinit":
             {
                 // Remove ONE field assignment from a method, together with the instructions

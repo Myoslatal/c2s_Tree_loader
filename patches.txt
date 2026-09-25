@@ -67,10 +67,16 @@ call        EventController Update CustomEventPackPlugin CustomEventPack.PatchHo
 # Applied INSIDE CalTap*Value so EVERY tap path is covered: the manual tap passes the
 # TapEmptySpace.scale field (1.0) and the Assistant passes 10.0, so patching either call
 # site only ever fixed one of them.
-scalearg    GameController CalTapEvolutionValue 5
-scalearg    GameController CalTapIdeaValue 5
-scalearg    GameController CalTapDinoValue 5
-scalearg    GameController CalTapSciValue 5
+# The factor used to be a literal 5 baked into the IL, which meant every tweak
+# needed a rebuild. It is now read at runtime from CellToSingularity_Data/mod.cfg
+# (key tap_scale), re-read whenever the file changes, so it can be adjusted live.
+# CalTap*Value takes the tap amount as a double/float parameter and multiplies by
+# it internally, so scaling the parameter covers both the manual tap and the
+# Assistant auto-tap.
+scaleargcall GameController CalTapEvolutionValue CustomEventPackPlugin CustomEventPack.PatchHooks GetTapScale
+scaleargcall GameController CalTapIdeaValue CustomEventPackPlugin CustomEventPack.PatchHooks GetTapScale
+scaleargcall GameController CalTapDinoValue CustomEventPackPlugin CustomEventPack.PatchHooks GetTapScale
+scaleargcall GameController CalTapSciValue CustomEventPackPlugin CustomEventPack.PatchHooks GetTapScale
 
 # mod 5 (corrected) - nanobot cooldown is 0.
 # Zero ONLY the assignment that sets the cooldown length when a boost ends. That value is

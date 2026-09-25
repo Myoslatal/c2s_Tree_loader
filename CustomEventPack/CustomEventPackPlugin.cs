@@ -4492,6 +4492,87 @@ public static class PatchHooks
 	/// segment, unknown own rank, already ahead). Those rows keep an empty text, and an
 	/// empty text is the signal here to leave the hint alone.
 	/// </summary>
+	// ---- tap multiplier (mod.cfg: tap_scale=<float>) -------------------------------
+	//
+	// Rewritten per tap by the scaleargcall patch at the head of GameController.
+	// CalTap*Value, so the multiplier is a live value rather than a constant folded
+	// into the IL. Every tap path funnels through those four methods - the manual tap
+	// (TapEmptySpace.scale, default 1.0) and the Assistant auto-tap (literal 10.0) - so
+	// this one hook covers all of them.
+	//
+	// Config lives at <Application.dataPath>/mod.cfg, i.e. CellToSingularity_Data/mod.cfg,
+	// one "key = value" per line, "#" starts a comment. The file is re-read when its
+	// mtime changes, checked at most once per second, so editing it takes effect while
+	// the game is running.
+	private const float DefaultTapScale = 5f;
+	private static float _tapScale = DefaultTapScale;
+	private static long _cfgMtime = long.MinValue;
+	private static float _cfgNextCheck = float.NegativeInfinity;
+	private static string _cfgPath;
+	private static bool _cfgLogged;
+
+	private static string CfgPath
+	{
+		get
+		{
+			if (_cfgPath == null)
+				_cfgPath = System.IO.Path.Combine(UnityEngine.Application.dataPath, "mod.cfg");
+			return _cfgPath;
+		}
+	}
+
+	public static double GetTapScale()
+	{
+		try
+		{
+			float now = UnityEngine.Time.realtimeSinceStartup;
+			if (now >= _cfgNextCheck)
+			{
+				_cfgNextCheck = now + 1f;
+				if (System.IO.File.Exists(CfgPath))
+				{
+					long mt = System.IO.File.GetLastWriteTimeUtc(CfgPath).Ticks;
+					if (mt != _cfgMtime)
+					{
+						_cfgMtime = mt;
+						ReadCfg();
+					}
+				}
+				else if (!_cfgLogged)
+				{
+					_cfgLogged = true;
+					Log.Info("TAPCFG no " + CfgPath + " - tap_scale stays " + _tapScale);
+				}
+			}
+		}
+		catch (Exception e) { Log.Error("GetTapScale", e); }
+		return _tapScale;
+	}
+
+	private static void ReadCfg()
+	{
+		float v = DefaultTapScale;
+		bool found = false;
+		foreach (string raw in System.IO.File.ReadAllLines(CfgPath))
+		{
+			string line = raw.Trim();
+			if (line.Length == 0 || line[0] == '#' || line[0] == ';') continue;
+			int eq = line.IndexOf('=');
+			if (eq <= 0) continue;
+			if (line.Substring(0, eq).Trim() != "tap_scale") continue;
+			if (float.TryParse(line.Substring(eq + 1).Trim(),
+				System.Globalization.NumberStyles.Float,
+				System.Globalization.CultureInfo.InvariantCulture, out float parsed))
+			{
+				v = parsed;
+				found = true;
+			}
+		}
+		if (v < 0f) v = 0f;   // a negative multiplier would invert every tap
+		_tapScale = v;
+		Log.Info("TAPCFG tap_scale=" + v + (found ? "" : " (default; no tap_scale line)"));
+	}
+
 	public static void RewriteNextRankHint()
 	{
 		try

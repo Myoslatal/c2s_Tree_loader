@@ -49,6 +49,11 @@ cp "$M/Assembly-CSharp.dll.bak"   "$OUT/原版备份/Assembly-CSharp.dll"
 # Always land as zh-cn.ttf - see the lookup path in the header comment.
 cp "$FONT" "$OUT/CellToSingularity_Data/StreamingAssets/zh-cn.ttf"
 
+# Runtime configuration: the tap multiplier is read from here (key tap_scale),
+# hot-reloaded when the file changes. Ship the template so the file exists on a
+# fresh install and the player can simply edit it.
+cp "$DATA/_mod_tools/mod.cfg" "$OUT/CellToSingularity_Data/mod.cfg"
+
 cp "$DATA/_mod_tools/mod_release_README.md" "$OUT/README.md"
 cp "$OUT/README.md" "$OUT/CellToSingularity_Data/CustomEvents/README.md"
 
@@ -58,3 +63,4 @@ rm -f "$ZIP"
 echo "OK: $ZIP"
 echo "    $(stat -c%s "$ZIP") bytes"
 echo "    font: $FONT ($(stat -c%s "$FONT") bytes) -> StreamingAssets/zh-cn.ttf"
+echo "    config: CellToSingularity_Data/mod.cfg (tap_scale = 5)"
